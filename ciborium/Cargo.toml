@@ -22,8 +22,15 @@ is-it-maintained-open-issues = { repository = "enarx/ciborium" }
 
 [dependencies]
 ciborium-ll = { path = "../ciborium-ll", version = "0.2.2" }
-ciborium-io = { path = "../ciborium-io", version = "0.2.2", features = ["alloc"] }
-serde = { version = "1.0.170", default-features = false, features = ["alloc", "derive"] }
+ciborium-io = { path = "../ciborium-io", version = "0.2.2", features = [
+    "alloc",
+] }
+serde = { version = "1.0.170", default-features = false, features = [
+    "alloc",
+    "derive",
+] }
+half = { version = "2", default-features = false, features = ["bytemuck"] }
+bytemuck = "1"
 
 [dev-dependencies]
 serde_bytes = "0.11"
