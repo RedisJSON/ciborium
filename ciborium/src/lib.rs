@@ -95,6 +95,7 @@ extern crate alloc;
 pub mod de;
 pub mod ser;
 pub mod tag;
+pub mod typed_array;
 pub mod value;
 
 // Re-export the [items recommended by serde](https://serde.rs/conventions.html).
