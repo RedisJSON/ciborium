@@ -86,13 +86,7 @@ fn round_trip_i64() {
 
 #[test]
 fn round_trip_f64() {
-    let a = TypedArray(vec![
-        0.0f64,
-        -1.5,
-        3.12,
-        f64::MAX,
-        f64::MIN_POSITIVE,
-    ]);
+    let a = TypedArray(vec![0.0f64, -1.5, 3.12, f64::MAX, f64::MIN_POSITIVE]);
     assert_eq!(round_trip(&a), a);
 }
 
