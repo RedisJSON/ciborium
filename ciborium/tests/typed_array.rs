@@ -68,7 +68,7 @@ fn round_trip_i32() {
 
 #[test]
 fn round_trip_f32() {
-    let a = TypedArray(vec![0.0f32, -1.5, 3.14, f32::MAX, f32::MIN_POSITIVE]);
+    let a = TypedArray(vec![0.0f32, -1.5, 3.12, f32::MAX, f32::MIN_POSITIVE]);
     assert_eq!(round_trip(&a), a);
 }
 
@@ -89,7 +89,7 @@ fn round_trip_f64() {
     let a = TypedArray(vec![
         0.0f64,
         -1.5,
-        3.14159265358979,
+        3.12,
         f64::MAX,
         f64::MIN_POSITIVE,
     ]);
@@ -103,7 +103,7 @@ fn round_trip_f16() {
         f16::from_f32(0.0),
         f16::from_f32(1.0),
         f16::from_f32(-1.5),
-        f16::from_f32(3.14),
+        f16::from_f32(3.12),
     ]);
     assert_eq!(round_trip(&a), a);
 }
@@ -184,7 +184,7 @@ fn custom_tag_bf16_round_trip() {
     let original = CustomTypedArray::<bf16, BF16_TAG>(vec![
         bf16::from_f32(0.0),
         bf16::from_f32(1.0),
-        bf16::from_f32(-3.14),
+        bf16::from_f32(-3.12),
     ]);
     assert_eq!(round_trip_custom::<bf16, BF16_TAG>(&original), original);
 }
@@ -203,7 +203,7 @@ fn custom_tag_is_emitted() {
         ciborium::Value::Tag(tag, _) => {
             assert_eq!(tag, MY_TAG, "wrong tag emitted");
         }
-        other => panic!("expected Tag, got {:?}", other),
+        other => panic!("expected Tag, got {other:?}"),
     }
 }
 
