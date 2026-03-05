@@ -158,6 +158,24 @@ pub mod tag {
 
     pub const BIGPOS: u64 = 2;
     pub const BIGNEG: u64 = 3;
+
+    // RFC 8746 typed array tags (little-endian variants where applicable).
+    // Endianness-neutral:
+    pub const TYPED_U8: u64 = 64;
+    pub const TYPED_I8: u64 = 72;
+    // Little-endian 16-bit:
+    pub const TYPED_U16_LE: u64 = 69;
+    pub const TYPED_I16_LE: u64 = 77;
+    // Little-endian 32-bit:
+    pub const TYPED_U32_LE: u64 = 70;
+    pub const TYPED_I32_LE: u64 = 78;
+    pub const TYPED_F32_LE: u64 = 85;
+    // Little-endian 64-bit:
+    pub const TYPED_U64_LE: u64 = 71;
+    pub const TYPED_I64_LE: u64 = 79;
+    pub const TYPED_F64_LE: u64 = 86;
+    // IEEE 754 binary16 little-endian (RFC 8746):
+    pub const TYPED_F16_LE: u64 = 84;
 }
 
 #[derive(Debug)]
