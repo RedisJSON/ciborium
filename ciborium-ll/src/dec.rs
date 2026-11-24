@@ -4,6 +4,9 @@ use super::*;
 
 use ciborium_io::Read;
 
+#[cfg(feature = "half")]
+use half::f16;
+
 /// An error that occurred while decoding
 #[derive(Clone, Debug)]
 pub enum Error<T> {
@@ -33,7 +36,10 @@ impl<T> From<T> for Error<T> {
 pub struct Decoder<R> {
     reader: R,
     offset: usize,
-    buffer: Option<Title>,
+    /// A pushed-back header and the length its encoding would take on the
+    /// wire (prefix plus affix), so that `pull()` can hand it back without
+    /// re-decoding it.
+    buffer: Option<(Header, usize)>,
 }
 
 impl<R: Read> From<R> for Decoder<R> {
@@ -59,57 +65,126 @@ impl<R: Read> Read for Decoder<R> {
     }
 }
 
-impl<R: Read> Decoder<R> {
+/// The length of a header's canonical encoding (prefix plus affix).
+///
+/// This is the length `Encoder::push()` would write for the header, and the
+/// length `Title::from(header)` describes, computed without building the
+/// `Title`.
+#[inline]
+fn header_len(header: Header) -> usize {
     #[inline]
-    fn pull_title(&mut self) -> Result<Title, Error<R::Error>> {
-        if let Some(title) = self.buffer.take() {
-            self.offset += title.1.as_ref().len() + 1;
-            return Ok(title);
+    fn int(i: u64) -> usize {
+        match i {
+            x if x <= 23 => 0,
+            x if x <= u8::MAX as u64 => 1,
+            x if x <= u16::MAX as u64 => 2,
+            x if x <= u32::MAX as u64 => 4,
+            _ => 8,
         }
+    }
+
+    let len = |l: Option<usize>| l.map_or(0, |x| int(x as u64));
+
+    1 + match header {
+        Header::Positive(x) | Header::Negative(x) | Header::Tag(x) => int(x),
+        Header::Bytes(x) | Header::Text(x) | Header::Array(x) | Header::Map(x) => len(x),
+        Header::Break => 0,
+        Header::Simple(x) if x <= 23 => 0,
+        Header::Simple(..) => 1,
+        // Floats pick the narrowest lossless width; reuse the encoder's rule.
+        Header::Float(..) => Title::from(header).1.as_ref().len(),
+    }
+}
+
+impl<R: Read> Decoder<R> {
+    /// Reads one header from the wire.
+    ///
+    /// Each affix width is read with a `read_exact` of constant length, so
+    /// an in-memory reader compiles each arm to one bounds check and one
+    /// fixed-size load, and the `Header` is built directly from the prefix
+    /// and affix bytes.
+    #[inline]
+    fn pull_wire(&mut self) -> Result<Header, Error<R::Error>> {
+        let offset = self.offset;
 
         let mut prefix = [0u8; 1];
         self.read_exact(&mut prefix[..])?;
+        let major = prefix[0] >> 5;
+        let minor = prefix[0] & 0b00011111;
 
-        let major = match prefix[0] >> 5 {
-            0 => Major::Positive,
-            1 => Major::Negative,
-            2 => Major::Bytes,
-            3 => Major::Text,
-            4 => Major::Array,
-            5 => Major::Map,
-            6 => Major::Tag,
-            7 => Major::Other,
-            _ => unreachable!(),
+        // The argument of the header: an immediate value, or the following
+        // 1, 2, 4 or 8 bytes. Major type 7 reads its affix as a simple value
+        // or a float instead.
+        let arg: u64 = match minor {
+            x if x < 24 => x.into(),
+            24 => {
+                let mut b = [0u8; 1];
+                self.read_exact(&mut b[..])?;
+                if major == 7 {
+                    return Ok(Header::Simple(b[0]));
+                }
+                b[0].into()
+            }
+            25 => {
+                let mut b = [0u8; 2];
+                self.read_exact(&mut b[..])?;
+                if major == 7 {
+                    return Ok(Header::Float(f16::from_be_bytes(b).into()));
+                }
+                u16::from_be_bytes(b).into()
+            }
+            26 => {
+                let mut b = [0u8; 4];
+                self.read_exact(&mut b[..])?;
+                if major == 7 {
+                    return Ok(Header::Float(f32::from_be_bytes(b).into()));
+                }
+                u32::from_be_bytes(b).into()
+            }
+            27 => {
+                let mut b = [0u8; 8];
+                self.read_exact(&mut b[..])?;
+                if major == 7 {
+                    return Ok(Header::Float(f64::from_be_bytes(b)));
+                }
+                u64::from_be_bytes(b)
+            }
+            31 => {
+                return match major {
+                    2 => Ok(Header::Bytes(None)),
+                    3 => Ok(Header::Text(None)),
+                    4 => Ok(Header::Array(None)),
+                    5 => Ok(Header::Map(None)),
+                    7 => Ok(Header::Break),
+                    _ => Err(Error::Syntax(offset)),
+                };
+            }
+            _ => return Err(Error::Syntax(offset)),
         };
 
-        let mut minor = match prefix[0] & 0b00011111 {
-            x if x < 24 => Minor::This(x),
-            24 => Minor::Next1([0; 1]),
-            25 => Minor::Next2([0; 2]),
-            26 => Minor::Next4([0; 4]),
-            27 => Minor::Next8([0; 8]),
-            31 => Minor::More,
-            _ => return Err(Error::Syntax(self.offset - 1)),
-        };
+        let len = |x: u64| usize::try_from(x).map_err(|_| Error::Syntax(offset));
 
-        self.read_exact(minor.as_mut())?;
-        Ok(Title(major, minor))
-    }
-
-    #[inline]
-    fn push_title(&mut self, item: Title) {
-        assert!(self.buffer.is_none());
-        self.buffer = Some(item);
-        self.offset -= item.1.as_ref().len() + 1;
+        Ok(match major {
+            0 => Header::Positive(arg),
+            1 => Header::Negative(arg),
+            2 => Header::Bytes(Some(len(arg)?)),
+            3 => Header::Text(Some(len(arg)?)),
+            4 => Header::Array(Some(len(arg)?)),
+            5 => Header::Map(Some(len(arg)?)),
+            6 => Header::Tag(arg),
+            _ => Header::Simple(arg as u8),
+        })
     }
 
     /// Pulls the next header from the input
     #[inline]
     pub fn pull(&mut self) -> Result<Header, Error<R::Error>> {
-        let offset = self.offset;
-        self.pull_title()?
-            .try_into()
-            .map_err(|_| Error::Syntax(offset))
+        if let Some((header, len)) = self.buffer.take() {
+            self.offset += len;
+            return Ok(header);
+        }
+
+        self.pull_wire()
     }
 
     /// Push a single header into the input buffer
@@ -121,7 +196,10 @@ impl<R: Read> Decoder<R> {
     /// pulling a header to ensure there is nothing in the input buffer.
     #[inline]
     pub fn push(&mut self, item: Header) {
-        self.push_title(Title::from(item))
+        assert!(self.buffer.is_none());
+        let len = header_len(item);
+        self.buffer = Some((item, len));
+        self.offset -= len;
     }
 
     /// Gets the current byte offset into the stream
@@ -172,5 +250,99 @@ impl<R: Read> Decoder<R> {
             Header::Text(len) => Ok(len),
             _ => Err(()),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `header_len` must agree with the encoder's `Title` for every width
+    /// boundary, since `push()` relies on it to restore the stream offset.
+    #[test]
+    fn header_len_matches_title() {
+        let headers = [
+            Header::Positive(0),
+            Header::Positive(23),
+            Header::Positive(24),
+            Header::Positive(255),
+            Header::Positive(256),
+            Header::Positive(65535),
+            Header::Positive(65536),
+            Header::Positive(u32::MAX as u64),
+            Header::Positive(u32::MAX as u64 + 1),
+            Header::Positive(u64::MAX),
+            Header::Negative(0),
+            Header::Negative(u64::MAX),
+            Header::Tag(23),
+            Header::Tag(24),
+            Header::Tag(86),
+            Header::Bytes(None),
+            Header::Bytes(Some(23)),
+            Header::Bytes(Some(24)),
+            Header::Text(None),
+            Header::Text(Some(300)),
+            Header::Array(None),
+            Header::Array(Some(70000)),
+            Header::Map(None),
+            Header::Map(Some(5)),
+            Header::Break,
+            Header::Simple(0),
+            Header::Simple(23),
+            Header::Simple(24),
+            Header::Simple(255),
+            Header::Float(0.0),
+            Header::Float(1.5),
+            Header::Float(0.1),
+            Header::Float(f64::from(f32::MAX)),
+            Header::Float(f64::NAN),
+            Header::Float(f64::INFINITY),
+        ];
+
+        for header in headers {
+            let expected = Title::from(header).1.as_ref().len() + 1;
+            assert_eq!(header_len(header), expected, "{:?}", header);
+        }
+    }
+
+    /// Decoding through the push-back buffer must equal decoding from the wire.
+    #[test]
+    fn push_then_pull_is_identity() {
+        let input = b"\x1a\x00\x0f\x42\x40\x63abc\xff";
+        let mut decoder = Decoder::from(&input[..]);
+
+        let first = decoder.pull().unwrap();
+        assert_eq!(first, Header::Positive(1000000));
+        assert_eq!(decoder.offset(), 5);
+        decoder.push(first);
+        assert_eq!(decoder.offset(), 0);
+        assert_eq!(decoder.pull().unwrap(), first);
+        assert_eq!(decoder.offset(), 5);
+
+        let text = decoder.pull().unwrap();
+        assert_eq!(text, Header::Text(Some(3)));
+        decoder.push(text);
+        assert_eq!(decoder.offset(), 5);
+        assert_eq!(decoder.pull().unwrap(), text);
+        assert_eq!(decoder.offset(), 6);
+        let mut body = [0u8; 3];
+        decoder.read_exact(&mut body[..]).unwrap();
+        assert_eq!(&body, b"abc");
+        assert_eq!(decoder.pull().unwrap(), Header::Break);
+        assert_eq!(decoder.offset(), 10);
+    }
+
+    /// Invalid minor codes and indefinite integers report the prefix offset.
+    #[test]
+    fn syntax_errors_report_prefix_offset() {
+        for bad in [0x1cu8, 0x1d, 0x1e, 0x1f, 0x3f, 0xdf] {
+            let input = [0x00u8, bad];
+            let mut decoder = Decoder::from(&input[..]);
+            assert_eq!(decoder.pull().unwrap(), Header::Positive(0));
+            match decoder.pull() {
+                Err(Error::Syntax(1)) => {}
+                other => panic!("{:#04x}: {:?}", bad, other),
+            }
+        }
     }
 }
